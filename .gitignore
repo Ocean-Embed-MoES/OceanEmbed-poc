@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+wheels/
+pip-wheel-metadata/
+.installed.cfg
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data files (large)
+*.nc
+*.nc4
+*.hdf5
+*.h5
+*.zarr
+data/raw/
+data/processed/
+
+# Model checkpoints
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+
+# Logs
+logs/
+wandb/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local cache
+local-cache-framework/
+
+# PDFs (research papers — too large for repo)
+*.pdf
