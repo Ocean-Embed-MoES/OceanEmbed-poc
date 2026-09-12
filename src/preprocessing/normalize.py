@@ -100,7 +100,7 @@ def normalize(
         out[c] = (arr[c] - mean_c) / std_c
 
     NaN values (land, missing data) are propagated as-is.
-    If std_c < 1e-8 (constant channel), std_c is treated as 1.0 to avoid /0.
+    If std_c < 1e-10 (effectively constant channel), std_c is treated as 1.0.
 
     Parameters
     ----------
@@ -118,7 +118,7 @@ def normalize(
         idx = [slice(None)] * out.ndim
         idx[channel_axis] = c
         mean = np.float32(stats[name]["mean"])
-        std  = np.float32(max(stats[name]["std"], 1e-8))
+        std  = np.float32(max(stats[name]["std"], 1e-10))
         out[tuple(idx)] = (out[tuple(idx)] - mean) / std
     return out
 
