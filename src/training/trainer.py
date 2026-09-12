@@ -256,7 +256,7 @@ class _MetricAccumulator:
 
     def update(self, out: LossOutput, batch_size: int) -> None:
         metrics = {
-            "total":       float(out.total),
+            "total":       float(out.total.detach()),
             "mixed_layer": out.mixed_layer,
             "thermocline": out.thermocline,
             "deep_ocean":  out.deep_ocean,
