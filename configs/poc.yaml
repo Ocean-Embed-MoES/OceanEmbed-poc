@@ -1,0 +1,83 @@
+# OceanEmbed PoC — Master Configuration
+# All hyperparameters, paths, and split definitions live here.
+# Scripts and modules read this file; nothing is hardcoded elsewhere.
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data:
+  # SSD cache root — where framework.ipynb pre-downloaded the raw datasets
+  cache_root: /run/media/mohan-krishna/vamSHE/data-pool
+
+  # Output directory for preprocessed (regridded + feature-engineered) data
+  # Created by scripts/prepare_data.py; gitignored
+  processed_dir: outputs/processed
+
+  # North Indian Ocean domain (problem statement §3.1)
+  lat_min: 5.0
+  lat_max: 30.0
+  lon_min: 45.0
+  lon_max: 105.0
+
+  # PoC spatial resolution (degrees).
+  # Full design uses 0.25°; PoC uses 0.5° to keep training feasible.
+  # Grid: 50 lat × 120 lon cells.
+  grid_res: 0.5
+
+  # Data splits
+  # Train:     2015–2017  (~1095 days)
+  # Validate:  2018       (~365 days)  — used for early stopping
+  # Test:      2019–2020  (~731 days)  — NEVER seen during training
+  train_start: "2015-01-01"
+  train_end:   "2017-12-31"
+  val_start:   "2018-01-01"
+  val_end:     "2018-12-31"
+  test_start:  "2019-01-01"
+  test_end:    "2020-12-31"
+
+  # Number of consecutive daily snapshots stacked as input channels.
+  # Full design uses 7; PoC uses 3.
+  temporal_window: 3
+
+# ── Input channels ────────────────────────────────────────────────────────────
+# 8 channels derived from 5 PS-required surface variable types.
+# Raw wind components (uwnd, vwnd) are NEVER model inputs —
+# only Wind Stress Curl (WSC) is used, per the architecture design.
+channels:
+  names:
+    - sst        # Sea Surface Temperature (OSTIA 0.05° → regridded)
+    - grad_sst   # log|∇SST| — fronts and mesoscale eddy signature
+    - sla        # Sea Level Anomaly (DUACS 0.25°, used as SSH proxy)
+    - grad_sla   # log|∇SLA| — frontal sharpness, geostrophic gradients
+    - sss        # Sea Surface Salinity (SMAP/SMOS 0.125° → regridded)
+    - wsc        # Wind Stress Curl — Ekman pumping/suction signal
+    - u_curr     # Eastward surface current (OSCAR 0.25°)
+    - v_curr     # Northward surface current (OSCAR 0.25°)
+
+# ── Target depth levels (metres) — problem statement §3.6a ───────────────────
+standard_depths: [0, 5, 10, 20, 30, 50, 75, 100, 125, 150, 200, 300, 500, 700, 1000]
+
+# Depth zone index ranges (0-indexed, inclusive) for stratified loss
+depth_zones:
+  mixed_layer: [0, 4]    # 0, 5, 10, 20, 30 m
+  thermocline:  [5, 10]  # 50, 75, 100, 125, 150, 200 m
+  deep_ocean:  [11, 14]  # 300, 500, 700, 1000 m
+
+# ── Model (PoC-scale U-Net) ───────────────────────────────────────────────────
+model:
+  # Encoder channel progression (each followed by MaxPool)
+  enc_channels: [32, 64, 128]  # bottleneck = 128 ch @ (H/4 × W/4)
+
+  # Full design: [64, 128, 256, 512] — scaled down for PoC
+
+# ── Training ──────────────────────────────────────────────────────────────────
+training:
+  epochs:        40
+  batch_size:    4
+  learning_rate: 1.0e-3
+  weight_decay:  1.0e-4
+  checkpoint_dir: outputs/checkpoints
+
+  # Depth-zone loss weights (depth-stratified masked RMSE)
+  depth_weights:
+    mixed_layer:  1.0   # well-constrained by SST
+    thermocline:  2.0   # hardest zone; most important for applications
+    deep_ocean:   0.5   # model gets these almost for free

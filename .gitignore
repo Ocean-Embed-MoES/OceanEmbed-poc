@@ -1,4 +1,16 @@
-# Python
+# ── Project-specific ─────────────────────────────────────────────────────────
+
+# Working notes (private scratchpad — not a deliverable)
+SCRATCHPAD.md
+
+# Preprocessed data and model outputs (large, machine-generated)
+outputs/processed/
+outputs/checkpoints/
+outputs/metrics/
+outputs/plots/
+outputs/*.csv
+
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.pyo
