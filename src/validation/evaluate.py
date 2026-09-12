@@ -9,24 +9,20 @@ PRIMARY   : INCOIS LAS VAM     — in-situ optimally interpolated, 10-day, 1°
             INCOIS McCreary    — model+in-situ blended, 10-day, 1°
 SUPPLEMENTARY : ARMOR3D        — satellite+in-situ blended, daily, 0.125°
                                  (excluded from primary ranking due to
-                                  resolution constraint — 1° vs 0.5° model)
+                                  resolution constraint)
 
-Workflow
---------
-  1. Ensure test split (2019–2020) is preprocessed; run it if not.
-  2. Run model inference on every test day → (N_test, 15, 50, 120) in °C.
-  3. For INCOIS (10-day, 1°):
-       - Find nearest-day model prediction for each INCOIS timestep.
-       - Bilinear-regrid model 0.5° → 1°.
-       - Select 14 common depths (INCOIS has no 0 m level).
-       - Compute RMSE, Bias, R², r at each depth.
-  4. For ARMOR3D (daily, 0.125°):
-       - Direct date-matched subset.
-       - Bilinear-regrid model 0.5° → 0.125°.
-       - Interpolate ARMOR3D to our 15 PS-standard depths.
-       - Compute metrics at each depth.
-  5. Save structured results to outputs/metrics/validation_results.json
-     and a human-readable summary to outputs/metrics/validation_summary.txt.
+Memory-efficient design
+-----------------------
+The naive approach of loading all 729 predictions + a full year of ARMOR3D
+would require ~6 GB of RAM — OOM on a laptop.
+
+Instead:
+  - Predictions (N=729, 15, 50, 120) at 0.5° ≈ 263 MB — kept in RAM.
+  - INCOIS comparison: only the ~72 matched timesteps are regridded (one at a
+    time), not all 729. Peak memory per step ≈ 1 MB.
+  - ARMOR3D comparison: processed month-by-month (~400 MB/month), immediately
+    resampled to the model's own 0.5° grid (not upscaled to 0.125°). Running
+    statistics accumulated per depth — no large arrays kept alive.
 """
 from __future__ import annotations
 
@@ -35,41 +31,118 @@ import pathlib
 import sys
 import time
 from datetime import datetime
+from typing import Iterator
 
 import numpy as np
 import pandas as pd
 import torch
 import xarray as xr
-import yaml
 from torch.utils.data import DataLoader
 
-# Allow running as a module from any directory
 _ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_ROOT))
 
 from src.data.cache_loader import (
     get_armor3d, get_incois_mccreary, get_incois_vam,
 )
-from src.data.dataset       import OceanEmbedDataset
-from src.model              import OceanEmbedModel
-from src.preprocessing.normalize import load_stats, denormalize
+from src.data.dataset    import OceanEmbedDataset
+from src.model           import OceanEmbedModel
+from src.preprocessing.normalize import load_stats
 from src.preprocessing.regrid    import make_target_grid
-from src.validation.metrics import depth_profile_metrics, summary_table
+from src.validation.metrics      import summary_table
 
 # ── Depth constants ────────────────────────────────────────────────────────────
 STANDARD_DEPTHS = [0, 5, 10, 20, 30, 50, 75, 100, 125, 150, 200, 300, 500, 700, 1000]
 DEPTH_LABELS    = [f"d{d}m" for d in STANDARD_DEPTHS]
 
-# Depths that exist in INCOIS ZAX (no 0 m level)
-INCOIS_ZAX = [5.0, 10.0, 20.0, 30.0, 50.0, 75.0, 100.0, 125.0, 150.0,
-              200.0, 250.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0,
-              900.0, 1000.0, 1200.0, 1400.0, 1600.0, 1800.0, 2000.0]
-
-# Our standard depths that overlap with INCOIS (excludes 0 m)
-COMMON_DEPTHS_INCOIS = [d for d in STANDARD_DEPTHS if float(d) in INCOIS_ZAX]
+# Depths that exist in INCOIS ZAX (no 0 m level in INCOIS product)
+_INCOIS_ZAX = [5, 10, 20, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400,
+               500, 600, 700, 800, 900, 1000, 1200, 1400, 1600, 1800, 2000]
+COMMON_DEPTHS_INCOIS = [d for d in STANDARD_DEPTHS if d in _INCOIS_ZAX]
 COMMON_LABELS_INCOIS = [f"d{d}m" for d in COMMON_DEPTHS_INCOIS]
 COMMON_IDX_INCOIS    = [STANDARD_DEPTHS.index(d) for d in COMMON_DEPTHS_INCOIS]
 
+
+# ── Running stats accumulator (online / one-pass) ──────────────────────────────
+
+class _RunningStats:
+    """
+    Accumulate RMSE, Bias, Pearson-r statistics incrementally without
+    storing all observations in RAM.
+
+    Uses Welford-style running sums so any number of timesteps can be
+    processed one-at-a-time with O(1) extra memory.
+    """
+
+    __slots__ = ("_n", "_sum_sq_err", "_sum_diff",
+                 "_sum_p", "_sum_o", "_sum_pp", "_sum_oo", "_sum_po")
+
+    def __init__(self) -> None:
+        self._n          = 0
+        self._sum_sq_err = 0.0   # sum (pred - obs)^2
+        self._sum_diff   = 0.0   # sum (pred - obs)
+        self._sum_p      = 0.0
+        self._sum_o      = 0.0
+        self._sum_pp     = 0.0
+        self._sum_oo     = 0.0
+        self._sum_po     = 0.0   # sum (pred * obs)
+
+    def update(self, pred_flat: np.ndarray, obs_flat: np.ndarray) -> None:
+        """Accept 1-D arrays of valid (non-NaN) pixels for one timestep."""
+        n = len(pred_flat)
+        if n == 0:
+            return
+        diff = pred_flat - obs_flat
+        self._n          += n
+        self._sum_sq_err += float(np.sum(diff * diff))
+        self._sum_diff   += float(np.sum(diff))
+        self._sum_p      += float(np.sum(pred_flat))
+        self._sum_o      += float(np.sum(obs_flat))
+        self._sum_pp     += float(np.sum(pred_flat * pred_flat))
+        self._sum_oo     += float(np.sum(obs_flat  * obs_flat))
+        self._sum_po     += float(np.sum(pred_flat * obs_flat))
+
+    def result(self) -> dict:
+        n = self._n
+        if n < 2:
+            return {"rmse": float("nan"), "bias": float("nan"),
+                    "r2":   float("nan"), "r":    float("nan"),
+                    "n_valid": 0}
+
+        rmse_val = float(np.sqrt(self._sum_sq_err / n))
+        bias_val = float(self._sum_diff / n)
+
+        pm = self._sum_p / n
+        om = self._sum_o / n
+        cov  = self._sum_po / n - pm * om
+        varp = max(self._sum_pp / n - pm * pm, 0.0)
+        varo = max(self._sum_oo / n - om * om, 0.0)
+        denom = float(np.sqrt(varp * varo))
+        r_val = float(cov / denom) if denom > 1e-12 else float("nan")
+
+        # R² = 1 − SS_res / SS_tot  (using obs variance as SS_tot denominator)
+        ss_tot = self._sum_oo - n * om * om
+        r2_val = float(1.0 - self._sum_sq_err / ss_tot) if ss_tot > 1e-12 else float("nan")
+
+        return {
+            "rmse":    rmse_val,
+            "bias":    bias_val,
+            "r2":      r2_val,
+            "r":       r_val,
+            "n_valid": n,
+        }
+
+
+def _month_periods(start: str, end: str) -> Iterator[tuple[str, str]]:
+    """Yield (month_start, month_end) pairs between start and end dates."""
+    for period in pd.period_range(start=start, end=end, freq="M"):
+        yield (
+            period.start_time.strftime("%Y-%m-%d"),
+            period.end_time.strftime("%Y-%m-%d"),
+        )
+
+
+# ── Evaluator ─────────────────────────────────────────────────────────────────
 
 class OceanEmbedEvaluator:
     """
@@ -78,7 +151,7 @@ class OceanEmbedEvaluator:
     Parameters
     ----------
     checkpoint_path : Path to best.pt checkpoint.
-    cfg             : Full YAML config dict.
+    cfg             : Full YAML config dict (from poc.yaml).
     device          : Torch device.
     """
 
@@ -96,7 +169,7 @@ class OceanEmbedEvaluator:
         self.stats = load_stats(proc_root / "norm_stats.json")
 
         # ── Model ─────────────────────────────────────────────────────────────
-        ckpt = torch.load(checkpoint_path, map_location=device)
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
         tw   = cfg["data"]["temporal_window"]
         self.model = OceanEmbedModel(
             in_channels  = tw * len(cfg["channels"]["names"]),
@@ -106,8 +179,8 @@ class OceanEmbedEvaluator:
         self.model.load_state_dict(ckpt["model"])
         self.model.eval()
 
-        val_epoch  = ckpt.get("epoch", "?")
-        val_loss   = ckpt.get("val_loss", float("nan"))
+        val_epoch = ckpt.get("epoch", "?")
+        val_loss  = ckpt.get("val_loss", float("nan"))
         print(f"  Loaded checkpoint: epoch {val_epoch}, val_loss {val_loss:.4f}")
 
         # ── Target grid ───────────────────────────────────────────────────────
@@ -123,367 +196,315 @@ class OceanEmbedEvaluator:
     @torch.no_grad()
     def run_inference(
         self,
-        loader: DataLoader,
+        loader:  DataLoader,
         dataset: OceanEmbedDataset,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Run the model on all samples in loader and denormalize to °C.
+        Run the model on all test samples and denormalize to °C.
 
         Returns
         -------
         preds_C : (N, 15, H, W)  float32  — predicted temperature in °C
-        times   : (N,)           datetime64 — date of each prediction
-        masks   : (H, W)         bool       — shared ocean mask
+        times   : (N,)           datetime64[ns] — date of each prediction
         """
-        preds_norm_list = []
         t0 = time.perf_counter()
+        preds_norm_list: list[np.ndarray] = []
 
-        for x, _, mask in loader:
-            x = x.to(self.device)
-            out = self.model(x).cpu().numpy()        # (B, 15, H, W) normalised
+        for x, _, _mask in loader:
+            x   = x.to(self.device)
+            out = self.model(x).cpu().numpy()    # (B, 15, H, W) normalised
             preds_norm_list.append(out)
 
-        preds_norm = np.concatenate(preds_norm_list, axis=0)  # (N, 15, H, W)
+        preds_norm = np.concatenate(preds_norm_list, axis=0)   # (N, 15, H, W)
 
-        # Denormalize each depth channel from Z-score to °C
+        # Denormalize from Z-score to °C using per-depth norm stats
         target_stats = self.stats["targets"]
-        preds_C = np.zeros_like(preds_norm)
+        preds_C      = np.empty_like(preds_norm)
         for di, label in enumerate(DEPTH_LABELS):
-            mean = target_stats[label]["mean"]
-            std  = max(target_stats[label]["std"], 1e-10)
+            mean = float(target_stats[label]["mean"])
+            std  = max(float(target_stats[label]["std"]), 1e-10)
             preds_C[:, di] = preds_norm[:, di] * std + mean
 
-        # Timestamps corresponding to each sample (last day of the temporal window)
-        valid_indices = dataset.valid          # list of day-indices used as last-window-day
-        all_times     = dataset.times          # full array of daily timestamps
-        times         = all_times[valid_indices]
-
-        # Ocean mask from the first sample (same for all)
-        _, _, mask0 = dataset[0]
-        ocean_mask = mask0.numpy().astype(bool)
+        # Timestamps: one per sample = the last day of its temporal window
+        times = dataset.times[dataset.valid]
 
         elapsed = time.perf_counter() - t0
-        print(f"  Inference done: {len(preds_C)} samples in {elapsed:.1f}s")
-        return preds_C, times, ocean_mask
+        print(f"  Inference: {len(preds_C)} samples, {elapsed:.1f}s")
+        print(f"  T range: [{preds_C.min():.1f}, {preds_C.max():.1f}] °C")
+        return preds_C, times
 
-    # ── Spatial regridding helper ──────────────────────────────────────────────
-
-    @staticmethod
-    def _regrid_predictions(
-        preds:     np.ndarray,
-        times:     np.ndarray,
-        src_lats:  np.ndarray,
-        src_lons:  np.ndarray,
-        tgt_lats:  np.ndarray,
-        tgt_lons:  np.ndarray,
-    ) -> xr.DataArray:
-        """
-        Convert a (N, D, H, W) numpy array to xr.DataArray and bilinear-regrid
-        to (tgt_lats, tgt_lons) using xr.interp.
-        """
-        da = xr.DataArray(
-            preds.astype(np.float32),
-            dims   = ["time", "depth_idx", "latitude", "longitude"],
-            coords = {
-                "time":      times,
-                "depth_idx": np.arange(preds.shape[1]),
-                "latitude":  src_lats,
-                "longitude": src_lons,
-            },
-        )
-        return da.interp(
-            latitude  = tgt_lats,
-            longitude = tgt_lons,
-            method    = "linear",
-        )
-
-    # ── Time alignment helper ──────────────────────────────────────────────────
-
-    @staticmethod
-    def _align_times(
-        model_times:    np.ndarray,
-        product_times:  np.ndarray,
-        max_delta_days: int = 5,
-    ) -> list[tuple[int, int]]:
-        """
-        Find pairs (model_idx, product_idx) where model date is nearest to
-        product date within max_delta_days.
-        """
-        mt = pd.DatetimeIndex(model_times)
-        pairs: list[tuple[int, int]] = []
-        for pi, pt in enumerate(pd.DatetimeIndex(product_times)):
-            diffs = np.abs((mt - pt).days)
-            mi    = int(diffs.argmin())
-            if diffs[mi] <= max_delta_days:
-                pairs.append((mi, pi))
-        return pairs
-
-    # ── INCOIS comparison ──────────────────────────────────────────────────────
+    # ── INCOIS comparison — per-timestep regrid ────────────────────────────────
 
     def _compare_incois(
         self,
-        preds_C:    np.ndarray,
-        times:      np.ndarray,
-        start:      str,
-        end:        str,
-        source:     str,          # "vam" or "mccreary"
+        preds_C: np.ndarray,
+        times:   np.ndarray,
+        start:   str,
+        end:     str,
+        source:  str,          # "vam" or "mccreary"
     ) -> dict:
         """
         Compare model predictions against one INCOIS product.
 
-        Only depths present in both INCOIS ZAX and our STANDARD_DEPTHS
-        are evaluated (14 depths — no 0 m level in INCOIS).
-        Predictions are bilinear-regridded from 0.5° to INCOIS 1°.
+        Memory strategy: align ~72 timesteps first, then regrid and compare
+        one timestep at a time — peak extra memory ≈ a few MB.
+
+        Depths: 14 common (INCOIS has no 0 m level).
+        Spatial: model 0.5° bilinear-regridded to INCOIS 1°.
         """
-        print(f"\n  Comparing with INCOIS {source.upper()} ({start} → {end}) ...")
+        print(f"\n  INCOIS {source.upper()} [{start} → {end}] ...")
 
-        # Load INCOIS
-        if source == "vam":
-            ds     = get_incois_vam(start, end)
-            var    = "TEMP"
-        else:
-            ds     = get_incois_mccreary(start, end)
-            var    = "T_ANALYZED"
+        loader_fn = get_incois_vam if source == "vam" else get_incois_mccreary
+        obs_var   = "TEMP"         if source == "vam" else "T_ANALYZED"
 
-        # Subset to our NIO domain
-        d = self.cfg["data"]
+        ds = loader_fn(start, end)
+        d  = self.cfg["data"]
         ds = ds.sel(
             latitude  = slice(d["lat_min"], d["lat_max"]),
             longitude = slice(d["lon_min"], d["lon_max"]),
         )
         tgt_lats = ds.latitude.values
         tgt_lons = ds.longitude.values
-        print(f"    INCOIS grid: {len(tgt_lats)} lat × {len(tgt_lons)} lon (1°)")
-        print(f"    INCOIS timesteps: {len(ds.time)}")
+        print(f"    Grid: {len(tgt_lats)} lat × {len(tgt_lons)} lon | {len(ds.time)} timesteps")
 
-        # Regrid all model predictions to INCOIS 1° grid
-        pred_rg = self._regrid_predictions(
-            preds_C, times, self.target_lats, self.target_lons,
-            tgt_lats, tgt_lons,
-        )                                                # (N, 15, H_1, W_1)
+        # Align times
+        model_pdx  = pd.DatetimeIndex(times)
+        incois_pdx = pd.DatetimeIndex(ds.time.values)
+        pairs: list[tuple[int, int]] = []
+        for pi, pt in enumerate(incois_pdx):
+            diffs = np.abs((model_pdx - pt).days)
+            mi    = int(diffs.argmin())
+            if diffs[mi] <= 5:
+                pairs.append((mi, pi))
+        print(f"    Aligned pairs: {len(pairs)}")
 
-        # Time alignment: find model predictions nearest each INCOIS timestep
-        pairs = self._align_times(times, ds.time.values)
-        print(f"    Aligned pairs:  {len(pairs)}")
+        # Running stats per common depth
+        accum = {lbl: _RunningStats() for lbl in COMMON_LABELS_INCOIS}
 
-        # Build aligned arrays at common depths
-        pred_aligned = np.stack([
-            pred_rg.isel(time=mi, depth_idx=COMMON_IDX_INCOIS).values
-            for mi, _ in pairs
-        ], axis=0)                    # (P, 14, H_1, W_1)
+        for mi, pi in pairs:
+            # Regrid this one model snapshot (15, H, W) → (15, tgt_H, tgt_W)
+            snap_da = xr.DataArray(
+                preds_C[mi],
+                dims   = ["depth_idx", "latitude", "longitude"],
+                coords = {"latitude": self.target_lats, "longitude": self.target_lons},
+            )
+            snap_rg = snap_da.interp(
+                latitude  = tgt_lats,
+                longitude = tgt_lons,
+                method    = "linear",
+            ).values   # (15, tgt_H, tgt_W)
 
-        obs_aligned = np.stack([
-            ds[var].isel(time=pi).sel(ZAX=COMMON_DEPTHS_INCOIS).values
-            for _, pi in pairs
-        ], axis=0)                    # (P, 14, H_1, W_1)
+            # Observation at this timestep — select matching depths
+            obs = ds[obs_var].isel(time=pi).sel(
+                ZAX=COMMON_DEPTHS_INCOIS
+            ).values   # (14, tgt_H, tgt_W)
 
-        # Compute per-depth metrics
-        results = depth_profile_metrics(pred_aligned, obs_aligned, COMMON_LABELS_INCOIS)
-        return results
+            for k, (di, lbl) in enumerate(zip(COMMON_IDX_INCOIS, COMMON_LABELS_INCOIS)):
+                p_flat = snap_rg[di].ravel()
+                o_flat = obs[k].ravel()
+                valid  = np.isfinite(p_flat) & np.isfinite(o_flat)
+                accum[lbl].update(p_flat[valid], o_flat[valid])
 
-    # ── ARMOR3D comparison ─────────────────────────────────────────────────────
+        return {lbl: accum[lbl].result() for lbl in COMMON_LABELS_INCOIS}
+
+    # ── ARMOR3D comparison — month-by-month ────────────────────────────────────
 
     def _compare_armor3d(
         self,
-        preds_C:  np.ndarray,
-        times:    np.ndarray,
-        start:    str,
-        end:      str,
+        preds_C: np.ndarray,
+        times:   np.ndarray,
+        start:   str,
+        end:     str,
     ) -> dict:
         """
         Compare model predictions against ARMOR3D (supplementary).
 
-        ARMOR3D is daily at 0.125°.  Model is regridded to ARMOR3D grid;
-        ARMOR3D is interpolated to our 15 PS-standard depths.
+        Memory strategy: load one month at a time (~400 MB), immediately
+        resample ARMOR3D to the model's own 0.5° grid (avoiding any upscale
+        to 0.125°), interpolate depths to our 15 PS-standard levels, then
+        compare and discard — peak extra memory ≈ 400 MB.
         """
-        print(f"\n  Comparing with ARMOR3D [{start} → {end}] (supplementary) ...")
+        print(f"\n  ARMOR3D [{start} → {end}] (supplementary, month-by-month) ...")
 
-        ds       = get_armor3d(start, end)
-        tgt_lats = ds.latitude.values
-        tgt_lons = ds.longitude.values
-        print(f"    ARMOR3D grid:  {len(tgt_lats)} lat × {len(tgt_lons)} lon (0.125°)")
-        print(f"    ARMOR3D timesteps: {len(ds.time)}")
+        model_pdx = pd.DatetimeIndex(times)
+        std_depths = np.array(STANDARD_DEPTHS, dtype=np.float64)
 
-        # Regrid all model predictions to ARMOR3D 0.125° grid
-        pred_rg = self._regrid_predictions(
-            preds_C, times, self.target_lats, self.target_lons,
-            tgt_lats, tgt_lons,
-        )                                                # (N, 15, H_A, W_A)
+        # Running stats per all 15 depths
+        accum  = {lbl: _RunningStats() for lbl in DEPTH_LABELS}
+        n_matched = 0
 
-        # Time alignment: ARMOR3D is daily — match exact dates
-        pairs = self._align_times(times, ds.time.values, max_delta_days=0)
-        print(f"    Date-matched pairs: {len(pairs)}")
+        for m_start, m_end in _month_periods(start, end):
+            try:
+                armor = get_armor3d(m_start, m_end)
+            except Exception as exc:
+                print(f"    {m_start[:7]}: skip ({exc})")
+                continue
 
-        if len(pairs) == 0:
-            print("    ⚠ No matching dates found — check test period vs ARMOR3D cache")
-            return {}
+            # Resample ARMOR3D (0.125°, up to 480×200) → model 0.5° grid
+            # interp is safe here: ~31 days × 37 depths × 50 × 120 ≈ 28 MB
+            armor_rg = armor["to"].interp(
+                latitude  = self.target_lats,
+                longitude = self.target_lons,
+                method    = "linear",
+            )   # (days_in_month, depth_armor, 50, 120)
 
-        # Interpolate ARMOR3D to our standard depths
-        std_depths_da = xr.DataArray(
-            np.array(STANDARD_DEPTHS, dtype=np.float64), dims="depth"
-        )
-
-        pred_aligned = []
-        obs_aligned  = []
-        for mi, ai in pairs:
-            p_snap = pred_rg.isel(time=mi).values   # (15, H_A, W_A)
-            o_raw  = ds["to"].isel(time=ai)          # (D_armor, H_A, W_A)
-            o_interp = o_raw.interp(
-                depth  = std_depths_da,
+            # Interpolate ARMOR3D depths to our 15 PS-standard depths
+            armor_interp = armor_rg.interp(
+                depth  = std_depths,
                 method = "linear",
-                kwargs = {"fill_value": "extrapolate", "bounds_error": False},
-            ).values                                  # (15, H_A, W_A)
-            pred_aligned.append(p_snap)
-            obs_aligned.append(o_interp)
+                kwargs = {"fill_value": float("nan"), "bounds_error": False},
+            )   # (days_in_month, 15, 50, 120)
 
-        pred_aligned = np.stack(pred_aligned, axis=0)   # (P, 15, H_A, W_A)
-        obs_aligned  = np.stack(obs_aligned,  axis=0)   # (P, 15, H_A, W_A)
+            armor_vals = armor_interp.values   # (days_in_month, 15, 50, 120)
+            armor_pdx  = pd.DatetimeIndex(armor.time.values)
 
-        results = depth_profile_metrics(pred_aligned, obs_aligned, DEPTH_LABELS)
-        return results
+            for ai, at in enumerate(armor_pdx):
+                diffs = np.abs((model_pdx - at).days)
+                mi    = int(diffs.argmin())
+                if diffs[mi] > 0:
+                    continue   # ARMOR3D is daily — only exact matches
+
+                n_matched += 1
+                for di, lbl in enumerate(DEPTH_LABELS):
+                    p_flat = preds_C[mi, di].ravel()
+                    o_flat = armor_vals[ai, di].ravel()
+                    valid  = np.isfinite(p_flat) & np.isfinite(o_flat)
+                    accum[lbl].update(p_flat[valid], o_flat[valid])
+
+            # Free this month's data before loading the next
+            del armor, armor_rg, armor_interp, armor_vals
+
+        print(f"    Matched days: {n_matched}")
+        return {lbl: accum[lbl].result() for lbl in DEPTH_LABELS}
 
     # ── Orchestrate ────────────────────────────────────────────────────────────
 
     def evaluate(
         self,
-        test_loader: DataLoader,
+        test_loader:  DataLoader,
         test_dataset: OceanEmbedDataset,
-        out_dir: pathlib.Path,
+        out_dir:      pathlib.Path,
     ) -> dict:
         """
-        Run full evaluation: inference → INCOIS VAM → McCreary → ARMOR3D.
+        Full evaluation: inference → INCOIS VAM → McCreary → ARMOR3D.
 
-        Returns the results dict and saves JSON + text summary.
+        Saves validation_results.json and validation_summary.txt to out_dir.
         """
         out_dir.mkdir(parents=True, exist_ok=True)
-        d = self.cfg["data"]
-        test_start = d["test_start"][:4]   # "2019"
-        test_end   = d["test_end"][:4]     # "2020"
+        d          = self.cfg["data"]
+        test_start = d["test_start"][:4]
+        test_end   = d["test_end"][:4]
 
-        # ── 1. Inference ──────────────────────────────────────────────────────
-        print("\n  Running inference on test split ...")
-        preds_C, times, _ = self.run_inference(test_loader, test_dataset)
-        print(f"  Predictions: {preds_C.shape}  range [{preds_C.min():.1f}, {preds_C.max():.1f}] °C")
+        print("\n  Running inference ...")
+        preds_C, times = self.run_inference(test_loader, test_dataset)
 
         results: dict = {
             "meta": {
-                "generated":   datetime.now().isoformat(),
-                "test_period": f"{test_start}–{test_end}",
-                "n_test_days": int(preds_C.shape[0]),
-                "grid":        f"0.5°  50×120  NIO",
-                "depths_m":    STANDARD_DEPTHS,
-                "note_primary":      "INCOIS LAS VAM + McCreary are the PRIMARY validation datasets",
-                "note_supplementary":"ARMOR3D is SUPPLEMENTARY — lower weight due to resolution constraint",
+                "generated":         datetime.now().isoformat(),
+                "test_period":       f"{test_start}–{test_end}",
+                "n_test_days":       int(preds_C.shape[0]),
+                "grid":              "0.5°  50×120  NIO",
+                "depths_m":          STANDARD_DEPTHS,
+                "note_primary":      "INCOIS LAS VAM + McCreary are PRIMARY validation",
+                "note_supplementary":"ARMOR3D is SUPPLEMENTARY — resampled to model 0.5° grid",
             },
-            "primary":      {},
-            "supplementary":{},
+            "primary":       {},
+            "supplementary": {},
         }
 
-        # ── 2. INCOIS VAM (PRIMARY) ───────────────────────────────────────────
+        # ── INCOIS VAM (PRIMARY) ──────────────────────────────────────────────
         for yr in [test_start, test_end]:
             key = f"incois_vam_{yr}"
-            print(f"\n─── INCOIS VAM {yr} ───")
             try:
                 r = self._compare_incois(
-                    preds_C, times,
-                    start=f"{yr}-01-01", end=f"{yr}-12-31",
-                    source="vam",
+                    preds_C, times, f"{yr}-01-01", f"{yr}-12-31", source="vam"
                 )
                 results["primary"][key] = r
                 _print_metrics(key, r)
             except Exception as exc:
-                print(f"    ⚠ INCOIS VAM {yr} failed: {exc}")
+                print(f"  ⚠ {key}: {exc}")
                 results["primary"][key] = {"error": str(exc)}
 
-        # ── 3. INCOIS McCreary (PRIMARY) ──────────────────────────────────────
+        # ── INCOIS McCreary (PRIMARY) ─────────────────────────────────────────
         for yr in [test_start, test_end]:
             key = f"incois_mccreary_{yr}"
-            print(f"\n─── INCOIS McCreary {yr} ───")
             try:
                 r = self._compare_incois(
-                    preds_C, times,
-                    start=f"{yr}-01-01", end=f"{yr}-12-31",
-                    source="mccreary",
+                    preds_C, times, f"{yr}-01-01", f"{yr}-12-31", source="mccreary"
                 )
                 results["primary"][key] = r
                 _print_metrics(key, r)
             except Exception as exc:
-                print(f"    ⚠ INCOIS McCreary {yr} failed: {exc}")
+                print(f"  ⚠ {key}: {exc}")
                 results["primary"][key] = {"error": str(exc)}
 
-        # ── 4. ARMOR3D (SUPPLEMENTARY) ────────────────────────────────────────
+        # ── ARMOR3D (SUPPLEMENTARY) ───────────────────────────────────────────
         for yr in [test_start, test_end]:
             key = f"armor3d_{yr}"
-            print(f"\n─── ARMOR3D {yr} (supplementary) ───")
             try:
                 r = self._compare_armor3d(
-                    preds_C, times,
-                    start=f"{yr}-01-01", end=f"{yr}-12-31",
+                    preds_C, times, f"{yr}-01-01", f"{yr}-12-31"
                 )
                 results["supplementary"][key] = r
                 _print_metrics(key, r)
             except Exception as exc:
-                print(f"    ⚠ ARMOR3D {yr} failed: {exc}")
+                print(f"  ⚠ {key}: {exc}")
                 results["supplementary"][key] = {"error": str(exc)}
 
-        # ── 5. Save outputs ───────────────────────────────────────────────────
+        # ── Save ──────────────────────────────────────────────────────────────
         json_path = out_dir / "validation_results.json"
         json_path.write_text(json.dumps(results, indent=2))
-        print(f"\n  Saved: {json_path}")
 
         txt_path = out_dir / "validation_summary.txt"
         txt_path.write_text(_build_summary(results))
-        print(f"  Saved: {txt_path}")
 
+        print(f"\n  Saved: {json_path}")
+        print(f"  Saved: {txt_path}")
         return results
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Formatting helpers ─────────────────────────────────────────────────────────
 
 def _print_metrics(key: str, metrics: dict) -> None:
-    """Print a compact metric table to stdout."""
-    if "error" in metrics:
+    if not metrics or "error" in metrics:
         return
-    first = next(iter(metrics.values()), None)
-    if first is None or "rmse" not in first:
+    first = next(iter(metrics.values()), {})
+    if "rmse" not in first:
         return
     print(f"\n  {key}:")
     print(summary_table(metrics, key))
 
 
 def _build_summary(results: dict) -> str:
-    """Build a readable text summary file."""
     lines = [
         "OceanEmbed PoC — Validation Summary",
         "=" * 65,
         f"Generated:   {results['meta']['generated']}",
         f"Test period: {results['meta']['test_period']}",
         f"Test days:   {results['meta']['n_test_days']}",
-        f"Grid:        {results['meta']['grid']}",
         "",
         "PRIMARY VALIDATION",
-        "  INCOIS LAS VAM + McCreary (in-situ based, 10-day, 1°)",
+        "  INCOIS LAS VAM + McCreary (in-situ, 10-day, 1°)",
         "-" * 65,
     ]
-    for key, metrics in results["primary"].items():
+    for key, m in results["primary"].items():
         lines.append(f"\n{key}:")
-        if "error" in metrics:
-            lines.append(f"  ERROR: {metrics['error']}")
+        if "error" in m:
+            lines.append(f"  ERROR: {m['error']}")
         else:
-            lines.append(summary_table(metrics, key))
+            lines.append(summary_table(m, key))
 
     lines += [
         "",
         "SUPPLEMENTARY VALIDATION",
-        "  ARMOR3D (satellite+in-situ blended, daily, 0.125°)",
-        "  Note: lower weight due to 1° resolution constraint vs 0.5° model",
+        "  ARMOR3D (blended, daily, resampled to model 0.5° grid)",
         "-" * 65,
     ]
-    for key, metrics in results["supplementary"].items():
+    for key, m in results["supplementary"].items():
         lines.append(f"\n{key}:")
-        if "error" in metrics:
-            lines.append(f"  ERROR: {metrics['error']}")
+        if "error" in m:
+            lines.append(f"  ERROR: {m['error']}")
         else:
-            lines.append(summary_table(metrics, key))
+            lines.append(summary_table(m, key))
 
     return "\n".join(lines)
