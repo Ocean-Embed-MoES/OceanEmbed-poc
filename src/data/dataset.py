@@ -114,6 +114,10 @@ class OceanEmbedDataset(Dataset):
         raw_inputs  = inp_ds["inputs"].values.astype(np.float32)
         raw_targets = tgt_ds["targets"].values.astype(np.float32)
 
+        # Calendar timestamps for every daily time step — used by the evaluator
+        # for temporal alignment against INCOIS (10-day) and ARMOR3D (daily).
+        self.times: np.ndarray = inp_ds["time"].values   # (T,) datetime64[ns]
+
         T_in, T_tgt = raw_inputs.shape[0], raw_targets.shape[0]
         if T_in != T_tgt:
             raise RuntimeError(
@@ -138,6 +142,11 @@ class OceanEmbedDataset(Dataset):
         self.T = T_in
         # First valid index needs tw-1 preceding days
         self._valid = list(range(self.tw - 1, self.T))
+
+    @property
+    def valid(self) -> list[int]:
+        """Day-indices into self.times corresponding to each dataset sample."""
+        return self._valid
 
     # ── Dataset protocol ──────────────────────────────────────────────────────
 
