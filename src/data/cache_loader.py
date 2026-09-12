@@ -141,10 +141,11 @@ def _load_chunks(
     if len(relevant) == 1:
         ds = xr.open_dataset(relevant[0]["file"])
     else:
+        _CFTIME_CODER = xr.coders.CFDatetimeCoder(use_cftime=True)
         ds = xr.open_mfdataset(
             [c["file"] for c in relevant],
-            combine    = "by_coords",
-            use_cftime = True,   # force cftime; _norm_time converts to datetime64[ns]
+            combine      = "by_coords",
+            decode_times = _CFTIME_CODER,   # handles mixed calendars; _norm_time converts to datetime64[ns]
         )
 
     ds = _norm_time(ds)
@@ -345,7 +346,8 @@ def get_winds(
     ds = (
         xr.open_dataset(chunks[0]["file"])
         if len(chunks) == 1
-        else xr.open_mfdataset([c["file"] for c in chunks], combine="by_coords", use_cftime=True)
+        else xr.open_mfdataset([c["file"] for c in chunks], combine="by_coords",
+                                decode_times=xr.coders.CFDatetimeCoder(use_cftime=True))
     )
     ds = _norm_time(ds)
     if "time" in ds.sizes:
@@ -439,7 +441,8 @@ def get_incois_vam(
     if not files:
         raise RuntimeError(f"INCOIS VAM not cached — no .nc files in {fp}")
     ds = (
-        xr.open_mfdataset(files, combine="by_coords", use_cftime=True)
+        xr.open_mfdataset(files, combine="by_coords",
+                          decode_times=xr.coders.CFDatetimeCoder(use_cftime=True))
         if len(files) > 1
         else xr.open_dataset(files[0])
     )
@@ -472,7 +475,8 @@ def get_incois_mccreary(
     if not files:
         raise RuntimeError(f"INCOIS McCreary not cached — no .nc files in {fp}")
     ds = (
-        xr.open_mfdataset(files, combine="by_coords", use_cftime=True)
+        xr.open_mfdataset(files, combine="by_coords",
+                          decode_times=xr.coders.CFDatetimeCoder(use_cftime=True))
         if len(files) > 1
         else xr.open_dataset(files[0])
     )
