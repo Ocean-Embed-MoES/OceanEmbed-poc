@@ -143,7 +143,8 @@ def _load_chunks(
     else:
         ds = xr.open_mfdataset(
             [c["file"] for c in relevant],
-            combine="by_coords",
+            combine    = "by_coords",
+            use_cftime = True,   # force cftime; _norm_time converts to datetime64[ns]
         )
 
     ds = _norm_time(ds)
@@ -293,12 +294,18 @@ def get_currents(
             f"No cached currents chunks overlap with {start}→{end}."
         )
 
-    ds = (
-        xr.open_dataset(chunks[0]["file"])
-        if len(chunks) == 1
-        else xr.open_mfdataset([c["file"] for c in chunks], combine="by_coords")
-    )
-    ds = _norm_time(ds)
+    if len(chunks) == 1:
+        ds = _norm_time(xr.open_dataset(chunks[0]["file"]))
+    else:
+        # Open each chunk independently and normalise its time before concat.
+        # This avoids xr.combine_by_coords crashing on mixed calendar types
+        # (e.g. OSCAR 2020 uses 'julian' while 2019 uses 'proleptic_gregorian').
+        parts = [_norm_time(xr.open_dataset(c["file"])) for c in chunks]
+        ds    = xr.concat(parts, dim="time").sortby("time")
+        # Drop duplicate timestamps that can arise when chunk boundaries overlap
+        _, unique_idx = np.unique(ds.time.values, return_index=True)
+        ds = ds.isel(time=unique_idx)
+
     if "time" in ds.sizes:
         ds = ds.sel(time=slice(start, end))
 
@@ -338,7 +345,7 @@ def get_winds(
     ds = (
         xr.open_dataset(chunks[0]["file"])
         if len(chunks) == 1
-        else xr.open_mfdataset([c["file"] for c in chunks], combine="by_coords")
+        else xr.open_mfdataset([c["file"] for c in chunks], combine="by_coords", use_cftime=True)
     )
     ds = _norm_time(ds)
     if "time" in ds.sizes:
@@ -432,7 +439,7 @@ def get_incois_vam(
     if not files:
         raise RuntimeError(f"INCOIS VAM not cached — no .nc files in {fp}")
     ds = (
-        xr.open_mfdataset(files, combine="by_coords")
+        xr.open_mfdataset(files, combine="by_coords", use_cftime=True)
         if len(files) > 1
         else xr.open_dataset(files[0])
     )
@@ -465,7 +472,7 @@ def get_incois_mccreary(
     if not files:
         raise RuntimeError(f"INCOIS McCreary not cached — no .nc files in {fp}")
     ds = (
-        xr.open_mfdataset(files, combine="by_coords")
+        xr.open_mfdataset(files, combine="by_coords", use_cftime=True)
         if len(files) > 1
         else xr.open_dataset(files[0])
     )
