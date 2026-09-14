@@ -1,22 +1,16 @@
-<div align="center">
+![SIH 2026](https://img.shields.io/badge/SIH-2026-ff69b4) ![Python 3.11](https://img.shields.io/badge/Python-3.11-blue) ![PyTorch >=2.1](https://img.shields.io/badge/PyTorch-%3E%3D2.1-orange) ![xarray >=2023.12](https://img.shields.io/badge/xarray-%3E%3D2023.12-blue) ![netCDF4 >=1.6](https://img.shields.io/badge/netCDF4-%3E%3D1.6-lightgrey) ![NumPy >=1.26](https://img.shields.io/badge/NumPy-%3E%3D1.26-4d77cf) ![Training Data](https://img.shields.io/badge/Training_Data-250_GB_cached-green)
 
-<img src="OceanEmbed.jpeg" alt="OceanEmbed Logo" width="320"/>
+<h1 align="center">OceanEmbed</h1>
 
-# OceanEmbed
+<p align="center">
+  Satellite-Based 3D Ocean Subsurface Temperature Reconstruction for the North Indian Ocean. <br>
+  <em>"From satellites on the surface to temperatures at 1000 m depth — every day, across the entire North Indian Ocean."</em>
+</p>
 
-### Satellite-Based 3D Ocean Subsurface Temperature Reconstruction for the North Indian Ocean
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/dd8cf2ad-a8be-45ae-84ae-050943f3c18c" alt="OceanEmbed Logo" width="400">
+</p>
 
-**SIH 2026 | INCOIS Problem Statement #SIH26066**
-
-[![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)](https://python.org)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.x-orange?logo=pytorch)](https://pytorch.org)
-[![Data](https://img.shields.io/badge/Training%20Data-250%20GB%20cached-green)](#data-infrastructure)
-
-*"From satellites on the surface to temperatures at 1000 m depth — every day, across the entire North Indian Ocean."*
-
-</div>
-
----
 
 ## What is OceanEmbed?
 
