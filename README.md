@@ -1,4 +1,4 @@
-![SIH 2026](https://img.shields.io/badge/SIH-2026-ff69b4) ![Python 3.11](https://img.shields.io/badge/Python-3.11-blue) ![PyTorch >=2.1](https://img.shields.io/badge/PyTorch-%3E%3D2.1-orange) ![xarray >=2023.12](https://img.shields.io/badge/xarray-%3E%3D2023.12-blue) ![netCDF4 >=1.6](https://img.shields.io/badge/netCDF4-%3E%3D1.6-lightgrey) ![NumPy >=1.26](https://img.shields.io/badge/NumPy-%3E%3D1.26-4d77cf) ![Training Data](https://img.shields.io/badge/Training_Data-250_GB_cached-green)
+![SIH 2026](https://img.shields.io/badge/SIH-2026-ff69b4) ![Python 3.11](https://img.shields.io/badge/Python-3.11-blue) ![PyTorch >=2.1](https://img.shields.io/badge/PyTorch-%3E%3D2.1-orange) ![xarray >=2023.12](https://img.shields.io/badge/xarray-%3E%3D2023.12-blue) ![netCDF4 >=1.6](https://img.shields.io/badge/netCDF4-%3E%3D1.6-lightgrey) ![NumPy >=1.26](https://img.shields.io/badge/NumPy-%3E%3D1.26-4d77cf) ![pyinterpolate](https://img.shields.io/badge/pyinterpolate-teal) ![Training Data](https://img.shields.io/badge/Training_Data-250_GB_cached-green)
 
 <h1 align="center">OceanEmbed</h1>
 
