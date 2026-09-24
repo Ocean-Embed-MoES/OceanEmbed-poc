@@ -18,9 +18,9 @@ data:
   lon_max: 105.0
 
   # PoC spatial resolution (degrees).
-  # Full design uses 0.25°; PoC uses 0.5° to keep training feasible.
-  # Grid: 50 lat × 120 lon cells.
-  grid_res: 0.5
+  # Full design uses 0.25°; running at full target resolution for comparison.
+  # Grid: 100 lat × 240 lon cells.
+  grid_res: 0.25
 
   # Data splits
   # Train:     2015–2017  (~1095 days)
