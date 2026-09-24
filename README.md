@@ -289,10 +289,16 @@ poc-v1/
 │   ├── evaluate.py                 # Evaluation CLI: INCOIS + ARMOR3D comparison
 │   └── plot_results.py             # Stage 6: depth profiles, bias maps, training curves
 │
-├── outputs/                        # gitignored — generated locally
-│   ├── figures/                    # Validation plots
-│   ├── metrics/                    # validation_results.json, validation_summary.txt
-│   └── checkpoints/                # best.pt, latest.pt
+├── notebooks/                          # Interactive Jupyter notebooks — start here
+│   ├── 01_data_pipeline.ipynb          # Pipeline walkthrough: 8-channel maps, norm stats
+│   ├── 02_model_architecture.ipynb     # CBAM U-Net inspection: shapes, attention, params
+│   ├── 03_training.ipynb               # Loss curves, checkpoint info, prediction profiles
+│   └── 04_validation.ipynb             # Full results: INCOIS + ARMOR3D, bias maps, roadmap
+│
+├── outputs/                            # gitignored — generated locally
+│   ├── figures/                        # Validation plots (depth_profile.png etc.)
+│   ├── metrics/                        # validation_results.json, validation_summary.txt
+│   └── checkpoints/                    # best.pt, latest.pt
 │
 ├── local-cache-framework/          # Cache index and loading documentation
 ├── architecture_design.md          # Architecture decisions with paper citations
