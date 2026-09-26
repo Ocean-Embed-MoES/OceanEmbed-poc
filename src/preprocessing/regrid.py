@@ -5,7 +5,7 @@ Regrid surface variable DataArrays to the common PoC target grid.
 
 Target grid
 -----------
-  Resolution : 0.5° × 0.5°
+  Resolution : 0.25° × 0.25°
   Domain     : North Indian Ocean — 5–30°N, 45–105°E
   Shape      : 50 latitude × 120 longitude cells
   Cell centres: offset half a cell inward from the domain boundary
@@ -16,7 +16,7 @@ Method
 ------
 Bilinear interpolation via xarray.DataArray.interp (backed by scipy).
 This is appropriate for smooth oceanographic fields and handles the
-resolution differences between inputs (0.05°–0.25°) and the target (0.5°).
+resolution differences between inputs (0.05°–0.25°) and the target (0.25°).
 NaN pixels (land, missing data) propagate naturally through interpolation.
 """
 from __future__ import annotations

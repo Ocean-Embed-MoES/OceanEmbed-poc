@@ -95,7 +95,7 @@ def _process_surface_inputs(
     wind_raw = get_winds(start, end, lat_min, lat_max, lon_min, lon_max)
     print(f"uwnd={wind_raw['uwnd'].shape}")
 
-    print("    Regriding surface inputs to 0.5° ...", end=" ", flush=True)
+    print("    Regriding surface inputs to 0.25° ...", end=" ", flush=True)
     t_rg = time.perf_counter()
 
     sst_rg    = regrid(sst_raw,          target_lats, target_lons).load()
@@ -171,7 +171,7 @@ def _process_glorys_chunked(
         glorys_raw = get_glorys(ms, me, lat_min, lat_max, lon_min, lon_max)
         thetao = glorys_raw["thetao"]   # (days, 36, 301, 721) — lazy
 
-        # Regrid spatially to 0.5° (still lazy until .load())
+        # Regrid spatially to 0.25° (still lazy until .load())
         thetao_rg = regrid(
             thetao, target_lats, target_lons,
             lat_dim="latitude", lon_dim="longitude",

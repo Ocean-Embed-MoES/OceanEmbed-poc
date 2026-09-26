@@ -134,7 +134,7 @@ def plot_depth_profiles(results: dict) -> None:
 
     fig.suptitle(
         "OceanEmbed PoC — Test-Set Validation (2019–2020)\n"
-        "Training: 2015–2017 · Grid: 0.5° 50×120 NIO · 858k params",
+        "Training: 2015–2017 · Grid: 0.25° 100×240 NIO · 858K params",
         fontsize=11, fontweight="bold", y=1.01
     )
     plt.tight_layout()

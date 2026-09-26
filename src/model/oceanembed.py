@@ -7,27 +7,27 @@ reconstruction from multi-channel surface observations.
 Architecture (PoC scale)
 ------------------------
 
-    Input:  (B, T*C_in, H, W) = (B, 24, 50, 120)
+    Input:  (B, T*C_in, H, W) = (B, 24, 100, 240)
             24 channels = 3-day window × 8 surface channels
 
-    Stem:   1×1 conv  →  (B, 32, 50, 120)
+    Stem:   1×1 conv  →  (B, 32, 100, 240)
             Projects the stacked temporal channels to the encoder's
             first feature dimension.
 
     Encoder (3 stages, each = double conv + CBAM + MaxPool):
-            enc1:  (B,  32, 50, 120) → skip1, down → (B,  32, 25, 60)
-            enc2:  (B,  64, 25,  60) → skip2, down → (B,  64, 12, 30)
-            enc3:  (B, 128, 12,  30) → skip3, down → (B, 128,  6, 15)
+            enc1:  (B,  32, 100, 240) → skip1, down → (B,  32,  50, 120)
+            enc2:  (B,  64,  50, 120) → skip2, down → (B,  64,  25,  60)
+            enc3:  (B, 128,  25,  60) → skip3, down → (B, 128,  12,  30)
 
     Bottleneck (double conv, no pool):
-            (B, 128, 6, 15) → (B, 128, 6, 15)
+            (B, 128, 12, 30) → (B, 128, 12, 30)
 
     Decoder (3 stages, each = bilinear upsample + skip cat + double conv + CBAM):
-            dec1:  upsample(6→12) + skip3 → (B,  64, 12, 30)
-            dec2:  upsample(12→25) + skip2 → (B,  32, 25, 60)
-            dec3:  upsample(25→50) + skip1 → (B,  32, 50, 120)
+            dec1:  upsample(12→25) + skip3 → (B,  64,  25,  60)
+            dec2:  upsample(25→50) + skip2 → (B,  32,  50, 120)
+            dec3:  upsample(50→100) + skip1 → (B,  32, 100, 240)
 
-    Head:   1×1 conv  →  (B, 15, 50, 120)
+    Head:   1×1 conv  →  (B, 15, 100, 240)
             One output channel per PS-standard depth level.
             No output activation — predictions are in normalized space.
 
@@ -35,7 +35,7 @@ Full design comparison
 ----------------------
     Dimension       Full design         PoC (this file)
     ─────────────────────────────────────────────────────
-    Grid            0.25°, 100×240      0.5°, 50×120
+    Grid            0.25°, 100×240      0.25°, 100×240
     Input channels  12 (+ static)       8 × 3-day window → 24
     Temporal window 7 days              3 days
     Enc channels    64→128→256→512      32→64→128

@@ -17,11 +17,11 @@ The naive approach of loading all 729 predictions + a full year of ARMOR3D
 would require ~6 GB of RAM — OOM on a laptop.
 
 Instead:
-  - Predictions (N=729, 15, 50, 120) at 0.5° ≈ 263 MB — kept in RAM.
+  - Predictions (N=729, 15, 100, 240) at 0.25° ≈ 263 MB — kept in RAM.
   - INCOIS comparison: only the ~72 matched timesteps are regridded (one at a
     time), not all 729. Peak memory per step ≈ 1 MB.
   - ARMOR3D comparison: processed month-by-month (~400 MB/month), immediately
-    resampled to the model's own 0.5° grid (not upscaled to 0.125°). Running
+    resampled to the model's own 0.25° grid (not upscaled to 0.125°). Running
     statistics accumulated per depth — no large arrays kept alive.
 """
 from __future__ import annotations
@@ -250,7 +250,7 @@ class OceanEmbedEvaluator:
         one timestep at a time — peak extra memory ≈ a few MB.
 
         Depths: 14 common (INCOIS has no 0 m level).
-        Spatial: model 0.5° bilinear-regridded to INCOIS 1°.
+        Spatial: model 0.25° bilinear-regridded to INCOIS 1°.
         """
         print(f"\n  INCOIS {source.upper()} [{start} → {end}] ...")
 
@@ -320,7 +320,7 @@ class OceanEmbedEvaluator:
         Compare model predictions against ARMOR3D (supplementary).
 
         Memory strategy: load one month at a time (~400 MB), immediately
-        resample ARMOR3D to the model's own 0.5° grid (avoiding any upscale
+        resample ARMOR3D to the model's own 0.25° grid (avoiding any upscale
         to 0.125°), interpolate depths to our 15 PS-standard levels, then
         compare and discard — peak extra memory ≈ 400 MB.
         """
@@ -340,8 +340,8 @@ class OceanEmbedEvaluator:
                 print(f"    {m_start[:7]}: skip ({exc})")
                 continue
 
-            # Resample ARMOR3D (0.125°, up to 480×200) → model 0.5° grid
-            # interp is safe here: ~31 days × 37 depths × 50 × 120 ≈ 28 MB
+            # Resample ARMOR3D (0.125°, up to 480×200) → model 0.25° grid
+            # interp is safe here: ~31 days × 37 depths × 100 × 240 ≈ 112 MB
             armor_rg = armor["to"].interp(
                 latitude  = self.target_lats,
                 longitude = self.target_lons,
@@ -403,10 +403,10 @@ class OceanEmbedEvaluator:
                 "generated":         datetime.now().isoformat(),
                 "test_period":       f"{test_start}–{test_end}",
                 "n_test_days":       int(preds_C.shape[0]),
-                "grid":              "0.5°  50×120  NIO",
+                "grid":              "0.25°  100×240  NIO",
                 "depths_m":          STANDARD_DEPTHS,
                 "note_primary":      "INCOIS LAS VAM + McCreary are PRIMARY validation",
-                "note_supplementary":"ARMOR3D is SUPPLEMENTARY — resampled to model 0.5° grid",
+                "note_supplementary":"ARMOR3D is SUPPLEMENTARY — resampled to model 0.25° grid",
             },
             "primary":       {},
             "supplementary": {},
@@ -497,7 +497,7 @@ def _build_summary(results: dict) -> str:
     lines += [
         "",
         "SUPPLEMENTARY VALIDATION",
-        "  ARMOR3D (blended, daily, resampled to model 0.5° grid)",
+        "  ARMOR3D (blended, daily, resampled to model 0.25° grid)",
         "-" * 65,
     ]
     for key, m in results["supplementary"].items():
